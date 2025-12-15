@@ -1,5 +1,5 @@
 <?php
-// admin_users.php - Manage users
+// admin_users.php - Manage users with DataTables
 require_once 'config.php';
 requireAdmin();
 
@@ -37,126 +37,6 @@ if (isset($_GET['toggle']) && isset($_GET['id'])) {
     if ($stmt->execute()) {
         $message = "User status updated!";
     }
-    $stmt->close();
-}
-
-// Handle user deletion
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['delete_user'])) {
-    $delete_user_id = $_POST['delete_user_id'];
-    
-    // Prevent self-deletion
-    if ($delete_user_id === $_SESSION['user_id']) {
-        $error = "You cannot delete your own account!";
-    } else {
-        // Start transaction
-        $conn->begin_transaction();
-        
-        try {
-            // Get user email before deletion
-            $get_email = $conn->prepare("SELECT email FROM users WHERE user_id = ?");
-            $get_email->bind_param("s", $delete_user_id);
-            $get_email->execute();
-            $email_result = $get_email->get_result();
-            $user_email = $email_result->num_rows > 0 ? $email_result->fetch_assoc()['email'] : null;
-            $get_email->close();
-            
-            // 1. Delete user's votes
-            $delete_votes = $conn->prepare("DELETE FROM votes WHERE voter_id = ?");
-            $delete_votes->bind_param("s", $delete_user_id);
-            $delete_votes->execute();
-            $delete_votes->close();
-            
-            // 2. Delete user's feedback
-            $delete_feedback = $conn->prepare("DELETE FROM feedback WHERE user_id = ?");
-            $delete_feedback->bind_param("s", $delete_user_id);
-            $delete_feedback->execute();
-            $delete_feedback->close();
-            
-            // 3. Delete user's candidates entries (and their votes)
-            // First get candidate IDs
-            $get_candidates = $conn->prepare("SELECT candidate_id FROM candidates WHERE user_id = ?");
-            $get_candidates->bind_param("s", $delete_user_id);
-            $get_candidates->execute();
-            $candidates_result = $get_candidates->get_result();
-            
-            while ($candidate = $candidates_result->fetch_assoc()) {
-                // Delete votes for this candidate
-                $delete_candidate_votes = $conn->prepare("DELETE FROM votes WHERE candidate_id = ?");
-                $delete_candidate_votes->bind_param("i", $candidate['candidate_id']);
-                $delete_candidate_votes->execute();
-                $delete_candidate_votes->close();
-            }
-            $get_candidates->close();
-            
-            // Now delete the candidates
-            $delete_candidates = $conn->prepare("DELETE FROM candidates WHERE user_id = ?");
-            $delete_candidates->bind_param("s", $delete_user_id);
-            $delete_candidates->execute();
-            $delete_candidates->close();
-            
-            // 4. Delete email verification records
-            if ($user_email) {
-                $check_verification = $conn->query("SHOW TABLES LIKE 'email_verification'");
-                if ($check_verification->num_rows > 0) {
-                    $delete_verification = $conn->prepare("DELETE FROM email_verification WHERE email = ?");
-                    $delete_verification->bind_param("s", $user_email);
-                    $delete_verification->execute();
-                    $delete_verification->close();
-                }
-            }
-            
-            // 5. Handle audit_log - Check if foreign key exists
-            $check_fk = $conn->query("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE 
-                WHERE TABLE_SCHEMA = 'student_voting_system' 
-                AND TABLE_NAME = 'audit_log' 
-                AND CONSTRAINT_NAME = 'audit_log_ibfk_1'");
-            
-            if ($check_fk->num_rows > 0) {
-                // Foreign key exists, need to remove it first
-                $error = "Database configuration error: Please run the SQL fix script to remove audit_log foreign key constraint. See admin_users.php instructions.";
-                throw new Exception($error);
-            } else {
-                // No foreign key constraint, safe to update audit_log
-                $update_audit = $conn->prepare("UPDATE audit_log SET user_id = 'DELETED_USER' WHERE user_id = ?");
-                $update_audit->bind_param("s", $delete_user_id);
-                $update_audit->execute();
-                $update_audit->close();
-            }
-            
-            // 6. Delete elections created by this user (or reassign to another admin)
-            $delete_elections = $conn->prepare("DELETE FROM elections WHERE created_by = ?");
-            $delete_elections->bind_param("s", $delete_user_id);
-            $delete_elections->execute();
-            $delete_elections->close();
-            
-            // 7. Finally delete the user
-            $delete_user = $conn->prepare("DELETE FROM users WHERE user_id = ?");
-            $delete_user->bind_param("s", $delete_user_id);
-            
-            if ($delete_user->execute()) {
-                // Log the deletion
-                $log_stmt = $conn->prepare("INSERT INTO audit_log (user_id, action, description) VALUES (?, 'USER_DELETED', ?)");
-                $log_desc = "Deleted user: " . $delete_user_id;
-                $log_stmt->bind_param("ss", $_SESSION['user_id'], $log_desc);
-                $log_stmt->execute();
-                $log_stmt->close();
-                
-                // Commit transaction
-                $conn->commit();
-                
-                $message = "User and all associated data deleted successfully!";
-            } else {
-                throw new Exception("Failed to delete user: " . $delete_user->error);
-            }
-            
-            $delete_user->close();
-            
-        } catch (Exception $e) {
-            // Rollback on error
-            $conn->rollback();
-            $error = "Error deleting user: " . $e->getMessage();
-        }
-    }
 }
 
 // Get all users
@@ -170,6 +50,10 @@ $users_result = $conn->query($users_query);
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Manage Users - Admin</title>
     <link rel="stylesheet" href="style.css">
+    
+    <!-- DataTables CSS -->
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
+    <link rel="stylesheet" href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.dataTables.min.css">
 </head>
 <body>
     <header>
@@ -231,7 +115,7 @@ $users_result = $conn->query($users_query);
         </div>
         
         <h2 class="mt-20">All Users</h2>
-        <table>
+        <table id="usersTable" class="display" style="width:100%">
             <thead>
                 <tr>
                     <th>User ID</th>
@@ -256,16 +140,6 @@ $users_result = $conn->query($users_query);
                         <a href="?toggle=1&id=<?php echo urlencode($user['user_id']); ?>" class="btn btn-secondary">
                             <?php echo $user['is_active'] ? 'Deactivate' : 'Activate'; ?>
                         </a>
-                        
-                        <?php if ($user['user_id'] !== $_SESSION['user_id']): ?>
-                            <form method="POST" action="" style="display: inline-block; margin-left: 5px;" 
-                                  onsubmit="return confirm('⚠️ WARNING: This will permanently delete user <?php echo htmlspecialchars($user['user_id']); ?> and ALL their data including:\n\n• All votes cast\n• All feedback submitted\n• Candidate entries\n• Email verification records\n\nThis action CANNOT be undone!\n\nAre you absolutely sure?');">
-                                <input type="hidden" name="delete_user_id" value="<?php echo htmlspecialchars($user['user_id']); ?>">
-                                <button type="submit" name="delete_user" style="background-color: #666; border-color: #666;">Delete</button>
-                            </form>
-                        <?php else: ?>
-                            <button disabled style="background-color: #ccc; border-color: #ccc; cursor: not-allowed;" title="Cannot delete yourself">Delete</button>
-                        <?php endif; ?>
                     </td>
                 </tr>
                 <?php endwhile; ?>
@@ -276,6 +150,45 @@ $users_result = $conn->query($users_query);
     <footer>
         <p>&copy; 2025 Student Voting System</p>
     </footer>
+    
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    
+    <!-- DataTables JS -->
+    <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+    
+    <!-- DataTables Buttons Extension (for Export functionality) -->
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/pdfmake.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.print.min.js"></script>
+    
+    <script>
+        $(document).ready(function() {
+            $('#usersTable').DataTable({
+                dom: 'Bfrtip',
+                buttons: [
+                    'copy', 
+                    'csv', 
+                    'excel', 
+                    'pdf', 
+                    'print'
+                ],
+                pageLength: 25,
+                order: [[3, 'asc'], [1, 'asc']], // Sort by role, then name
+                language: {
+                    search: "Search users:",
+                    lengthMenu: "Show _MENU_ users per page",
+                    info: "Showing _START_ to _END_ of _TOTAL_ users",
+                    infoEmpty: "No users found",
+                    infoFiltered: "(filtered from _MAX_ total users)",
+                    zeroRecords: "No matching users found"
+                }
+            });
+        });
+    </script>
 </body>
 </html>
 <?php $conn->close(); ?>
