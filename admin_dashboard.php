@@ -1,13 +1,8 @@
 <?php
-// admin_dashboard.php - Admin control panel
 require_once 'config.php';
-require_once 'auto_update_elections.php';
 requireAdmin();
 
 $conn = getDBConnection();
-
-// Auto-update election statuses
-autoUpdateElectionStatus();
 
 // Get statistics
 $stats_query = "SELECT 
@@ -28,6 +23,10 @@ $elections_result = $conn->query($elections_query);
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Dashboard - Student Voting System</title>
     <link rel="stylesheet" href="style.css">
+    
+    <!-- DataTables CSS -->
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
+    <link rel="stylesheet" href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.dataTables.min.css">
 </head>
 <body>
     <header>
@@ -69,7 +68,7 @@ $elections_result = $conn->query($elections_query);
         <h2 class="mt-20">All Elections</h2>
         <a href="admin_elections.php?action=create" class="btn mb-20">Create New Election</a>
         
-        <table>
+        <table id="electionsTable" class="display" style="width:100%">
             <thead>
                 <tr>
                     <th>ID</th>
@@ -85,9 +84,27 @@ $elections_result = $conn->query($elections_query);
                 <tr>
                     <td><?php echo $election['election_id']; ?></td>
                     <td><?php echo htmlspecialchars($election['title']); ?></td>
-                    <td><?php echo date('Y-m-d H:i', strtotime($election['start_date'])); ?></td>
-                    <td><?php echo date('Y-m-d H:i', strtotime($election['end_date'])); ?></td>
-                    <td><?php echo ucfirst($election['status']); ?></td>
+                    <td data-order="<?php echo strtotime($election['start_date']); ?>">
+                        <?php echo date('Y-m-d H:i', strtotime($election['start_date'])); ?>
+                    </td>
+                    <td data-order="<?php echo strtotime($election['end_date']); ?>">
+                        <?php echo date('Y-m-d H:i', strtotime($election['end_date'])); ?>
+                    </td>
+                    <td>
+                        <span style="padding: 4px 8px; border-radius: 4px; 
+                            background-color: <?php 
+                                echo $election['status'] == 'active' ? '#d4edda' : 
+                                    ($election['status'] == 'completed' ? '#cce5ff' : 
+                                    ($election['status'] == 'upcoming' ? '#fff3cd' : '#f8d7da')); 
+                            ?>; 
+                            color: <?php 
+                                echo $election['status'] == 'active' ? '#155724' : 
+                                    ($election['status'] == 'completed' ? '#004085' : 
+                                    ($election['status'] == 'upcoming' ? '#856404' : '#721c24')); 
+                            ?>;">
+                            <?php echo ucfirst($election['status']); ?>
+                        </span>
+                    </td>
                     <td>
                         <a href="admin_elections.php?action=manage&id=<?php echo $election['election_id']; ?>" class="btn">Manage</a>
                     </td>
@@ -100,6 +117,48 @@ $elections_result = $conn->query($elections_query);
     <footer>
         <p>&copy; 2025 Student Voting System</p>
     </footer>
+    
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    
+    <!-- DataTables JS -->
+    <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+    
+    <!-- DataTables Buttons Extension -->
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/pdfmake.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.print.min.js"></script>
+    
+    <script>
+        $(document).ready(function() {
+            $('#electionsTable').DataTable({
+                dom: 'Bfrtip',
+                buttons: [
+                    'copy', 
+                    'csv', 
+                    'excel', 
+                    'pdf', 
+                    'print'
+                ],
+                pageLength: 10,
+                order: [[2, 'desc']], // Sort by start date descending (newest first)
+                language: {
+                    search: "Search elections:",
+                    lengthMenu: "Show _MENU_ elections per page",
+                    info: "Showing _START_ to _END_ of _TOTAL_ elections",
+                    infoEmpty: "No elections found",
+                    infoFiltered: "(filtered from _MAX_ total elections)",
+                    zeroRecords: "No matching elections found"
+                },
+                columnDefs: [
+                    { orderable: false, targets: 5 } // Disable sorting on Actions column
+                ]
+            });
+        });
+    </script>
 </body>
 </html>
 <?php $conn->close(); ?>
