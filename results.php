@@ -5,8 +5,9 @@ requireLogin();
 
 $conn = getDBConnection();
 
-// Get completed elections
-$elections_query = "SELECT * FROM elections WHERE status = 'completed' ORDER BY end_date DESC";
+// Get completed and active elections (all users can see live results)
+$elections_query = "SELECT * FROM elections WHERE status IN ('completed', 'active') ORDER BY 
+    CASE WHEN status = 'active' THEN 0 ELSE 1 END, end_date DESC";
 $elections_result = $conn->query($elections_query);
 ?>
 <!DOCTYPE html>
@@ -37,7 +38,7 @@ $elections_result = $conn->query($elections_query);
                     <a href="create_election.php">Propose Election</a>
                     <a href="my_votes.php">My Votes</a>
                     <a href="results.php">Results</a>
-                    <a href="edit_profile.php">Edit Profile</a>
+                <a href="edit_profile.php">Edit Profile</a>
                 <?php endif; ?>
                 <a href="logout.php">Logout</a>
             </nav>
@@ -46,47 +47,114 @@ $elections_result = $conn->query($elections_query);
     
     <div class="container">
         <h2>Election Results</h2>
+        <p style="color: #666; margin-bottom: 20px;">
+            <em>Note: Live results are shown for active elections. Results update in real-time as votes are cast.</em>
+        </p>
         
         <?php if ($elections_result->num_rows > 0): ?>
             <?php 
             $election_counter = 0;
             while ($election = $elections_result->fetch_assoc()): 
                 $election_counter++;
+                $is_active = $election['status'] == 'active';
             ?>
                 <div class="card">
-                    <h3><?php echo htmlspecialchars($election['title']); ?></h3>
-                    <p><strong>Ended:</strong> <?php echo date('F j, Y g:i A', strtotime($election['end_date'])); ?></p>
+                    <h3>
+                        <?php echo htmlspecialchars($election['title']); ?>
+                        <?php if ($is_active): ?>
+                            <span style="background-color: #fff3cd; color: #856404; padding: 4px 12px; border-radius: 4px; font-size: 14px; margin-left: 10px;">
+                                🔴 LIVE
+                            </span>
+                        <?php endif; ?>
+                    </h3>
+                    
+                    <?php if ($is_active): ?>
+                        <p><strong>Status:</strong> <span style="color: #856404;">Active (Ongoing)</span></p>
+                        <p><strong>Ends:</strong> <?php echo date('F j, Y g:i A', strtotime($election['end_date'])); ?></p>
+                    <?php else: ?>
+                        <p><strong>Ended:</strong> <?php echo date('F j, Y g:i A', strtotime($election['end_date'])); ?></p>
+                    <?php endif; ?>
                     
                     <?php
                     // Get total eligible voters (students)
                     $total_voters_query = "SELECT COUNT(*) as total FROM users WHERE role = 'student' AND is_active = 1";
                     $total_voters = $conn->query($total_voters_query)->fetch_assoc()['total'];
                     
-                    // Get results for this election
-                    $results_query = "SELECT * FROM election_results WHERE election_id = ? ORDER BY position_id, total_votes DESC";
-                    $results_stmt = $conn->prepare($results_query);
-                    $results_stmt->bind_param("i", $election['election_id']);
-                    $results_stmt->execute();
-                    $results = $results_stmt->get_result();
-                    
-                    $current_position = null;
-                    $position_counter = 0;
-                    $position_data = [];
-                    
-                    // Group results by position
-                    while ($result = $results->fetch_assoc()) {
-                        $pos_id = $result['position_id'];
-                        if (!isset($position_data[$pos_id])) {
+                    // For active elections, get live results
+                    if ($is_active) {
+                        // Get positions
+                        $positions_query = "SELECT p.position_id, p.title as position_title 
+                            FROM positions p 
+                            WHERE p.election_id = ? 
+                            ORDER BY p.display_order";
+                        $positions_stmt = $conn->prepare($positions_query);
+                        $positions_stmt->bind_param("i", $election['election_id']);
+                        $positions_stmt->execute();
+                        $positions_result = $positions_stmt->get_result();
+                        
+                        $position_data = [];
+                        while ($position = $positions_result->fetch_assoc()) {
+                            $pos_id = $position['position_id'];
+                            
+                            // Get candidates and their vote counts
+                            $candidates_query = "SELECT 
+                                c.candidate_id,
+                                u.name as candidate_name,
+                                u.class as candidate_class,
+                                COUNT(v.vote_id) as total_votes
+                                FROM candidates c
+                                JOIN users u ON c.user_id = u.user_id
+                                LEFT JOIN votes v ON c.candidate_id = v.candidate_id
+                                WHERE c.position_id = ?
+                                GROUP BY c.candidate_id, u.name, u.class
+                                ORDER BY total_votes DESC";
+                            
+                            $candidates_stmt = $conn->prepare($candidates_query);
+                            $candidates_stmt->bind_param("i", $pos_id);
+                            $candidates_stmt->execute();
+                            $candidates_result = $candidates_stmt->get_result();
+                            
                             $position_data[$pos_id] = [
-                                'title' => $result['position_title'],
+                                'title' => $position['position_title'],
                                 'candidates' => []
                             ];
+                            
+                            while ($candidate = $candidates_result->fetch_assoc()) {
+                                $position_data[$pos_id]['candidates'][] = $candidate;
+                            }
+                            $candidates_stmt->close();
                         }
-                        $position_data[$pos_id]['candidates'][] = $result;
+                        $positions_stmt->close();
+                    } else {
+                        // For completed elections, use the view
+                        $results_query = "SELECT * FROM election_results WHERE election_id = ? ORDER BY position_id, total_votes DESC";
+                        $results_stmt = $conn->prepare($results_query);
+                        $results_stmt->bind_param("i", $election['election_id']);
+                        $results_stmt->execute();
+                        $results = $results_stmt->get_result();
+                        
+                        $position_data = [];
+                        while ($result = $results->fetch_assoc()) {
+                            $pos_id = $result['position_id'];
+                            if (!isset($position_data[$pos_id])) {
+                                $position_data[$pos_id] = [
+                                    'title' => $result['position_title'],
+                                    'candidates' => []
+                                ];
+                            }
+                            $position_data[$pos_id]['candidates'][] = [
+                                'candidate_name' => $result['candidate_name'],
+                                'candidate_class' => $result['candidate_class'],
+                                'total_votes' => $result['total_votes']
+                            ];
+                        }
+                        $results_stmt->close();
                     }
                     ?>
                     
-                    <?php foreach ($position_data as $pos_id => $position): 
+                    <?php 
+                    $position_counter = 0;
+                    foreach ($position_data as $pos_id => $position): 
                         $position_counter++;
                         $table_id = "resultsTable_" . $election_counter . "_" . $position_counter;
                         
@@ -176,11 +244,17 @@ $elections_result = $conn->query($elections_query);
                             </tfoot>
                         </table>
                     <?php endforeach; ?>
+                    
+                    <?php if ($is_active): ?>
+                        <p style="color: #856404; font-style: italic; margin-top: 15px;">
+                            ℹ️ These are live results. Results will continue to update as votes are cast.
+                        </p>
+                    <?php endif; ?>
                 </div>
             <?php endwhile; ?>
         <?php else: ?>
             <div class="card">
-                <p>No completed elections yet.</p>
+                <p>No active or completed elections yet.</p>
             </div>
         <?php endif; ?>
     </div>
